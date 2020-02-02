@@ -1,8 +1,13 @@
 package main
 
 import (
+	"compress/gzip"
+	"io/ioutil"
+	"mime"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 )
 
 func main() {
@@ -39,25 +44,48 @@ func large(w http.ResponseWriter, r *http.Request) {
 }
 
 func gzipMiddleware(h http.Handler) http.Handler {
+	pool := &sync.Pool{
+		New: func() interface{} {
+			return gzip.NewWriter(ioutil.Discard) //dev/null/
+		},
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// check is browser support gzip
-
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			h.ServeHTTP(w, r)
+			return
+		}
 		// check is request is web socket
-
+		if r.Header.Get("Sec-WebSocket-Key") != "" {
+			h.ServeHTTP(w, r)
+			return
+		}
 		// check is response already encoded
-
+		if w.Header().Get("Content-Encoding") != "" {
+			h.ServeHTTP(w, r)
+			return
+		}
 		// add header `Vary: Accept-Encoding` to response
-
+		// if w.Header().Get("Vary") != "Accept-Encoding" {
+		w.Header().Set("Vary", "Accept-Encoding")
+		// }
 		// wrap responseWriter with gzipResponseWriter
-
+		nw := &gzipResponseWriter{
+			ResponseWriter: w,
+			pool:           pool,
+		}
 		// don't forget to close gzip writer when done
-
+		defer nw.Close()
 		// call next handler
+		h.ServeHTTP(nw, r)
 	})
 }
 
 type gzipResponseWriter struct {
-	//
+	http.ResponseWriter
+	gw          *gzip.Writer
+	wroteHeader bool
+	pool        *sync.Pool
 }
 
 var allowCompressType = map[string]bool{
@@ -72,35 +100,60 @@ var allowCompressType = map[string]bool{
 
 func (w *gzipResponseWriter) init() {
 	// check is response already encoded
-
+	if w.Header().Get("Content-Encoding") != "" {
+		return
+	}
 	// if content length not init, retrive from response's header `Content-Length`
-
 	// skip if content length less than 860 bytes
+	if length, _ := strconv.Atoi(w.Header().Get("Content-Length")); length < 860 {
+		return
+	}
 
 	// skip if no match type
-
+	ct := w.Header().Get("Content-Type")
+	mt, _, _ := mime.ParseMediaType(ct)
+	if !allowCompressType[mt] {
+		return
+	}
 	// create new gzip writer
-
+	// w.gw = gzip.NewWriter(w.ResponseWriter)
+	w.gw = w.pool.Get().(*gzip.Writer)
+	w.gw.Reset(w.ResponseWriter)
 	// remove response header `Content-Length`
-
+	w.Header().Del("Content-Length")
 	// set response header `Content-Encoding: gzip`
+	w.Header().Set("Content-Encoding", "gzip")
 }
 
 func (w *gzipResponseWriter) Write(p []byte) (int, error) {
 	// write header if not written
-
+	if !w.wroteHeader {
+		w.WriteHeader(200)
+	}
 	// if gzip writer inited write to gzip writer
-
+	if w.gw != nil {
+		return w.gw.Write(p)
+	}
 	// if not bypass gzip writer to original response writer
-	return 0, nil
+	return w.ResponseWriter.Write(p)
 }
 
 func (w *gzipResponseWriter) Close() {
+	if w.gw != nil {
+		w.gw.Close()
+		w.pool.Put(w.gw)
+	}
 	// close gzip writer if inited
 }
 
 func (w *gzipResponseWriter) WriteHeader(code int) {
 	// do not write header twice
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
 	// init gzip writer
+	w.init()
 	// write header
+	w.ResponseWriter.WriteHeader(code)
 }
