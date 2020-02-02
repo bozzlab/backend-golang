@@ -29,6 +29,8 @@ func main() {
 
 	// block until receive signal
 	<-stop
+	log.Println("Pending")
+	<-stop
 	log.Println("Receive signal")
 
 	// shutdown server
